@@ -3,66 +3,71 @@ import time
 import logging
 
 class MU06ResourceScheduler:
-    def __init__(self, cpu_limit=85.0, ram_limit=85.0):
-        """
-        初始化硬體資源排程器
-        :param cpu_limit: CPU 負載熔斷閾值 (預設 85%)
-        :param ram_limit: 記憶體負載熔斷閾值 (預設 85%)
-        """
+    """
+    靜默調度中樞 (內部代號: MU-06)
+    負責本地資源壓制、電費曲線抹平，以及每日資源水位監控。
+    """
+    def __init__(self, cpu_limit=85.0, ram_limit=0.85):
+        # 實體資源限制參數 (保留原有的硬體壓制)
         self.cpu_limit = cpu_limit
         self.ram_limit = ram_limit
         
-        # 設置基礎日誌紀錄
-        logging.basicConfig(level=logging.INFO, format='[MU-06] %(asctime)s - %(message)s')
-
-    def check_system_load(self):
-        """
-        檢測當前系統負載狀態。
-        :return: (is_overloaded, current_cpu, current_ram)
-        """
-        # 取樣間隔 0.5 秒以獲取準確的 CPU 使用率
-        current_cpu = psutil.cpu_percent(interval=0.5)
-        current_ram = psutil.virtual_memory().percent
-
-        is_overloaded = current_cpu >= self.cpu_limit or current_ram >= self.ram_limit
+        # 資源水位計參數 (新增：防止 API/算力 枯竭)
+        self.daily_token_limit = 100000  # 每日 Token/算力 消耗上限
+        self.current_usage = 0           # 當前累計使用量
+        self.is_sleep_mode = False       # 強制休眠狀態
         
-        return is_overloaded, current_cpu, current_ram
+        logging.basicConfig(level=logging.INFO, format='[SCHEDULER] %(asctime)s - %(message)s')
+        logging.info("MU-06 靜默調度中樞更新完成：資源水位與實體硬體監控已就緒。")
 
-    def yield_resources(self, check_interval=5):
-        """
-        資源讓出機制 (阻塞當前高耗能進程，直到算力恢復)
-        """
-        is_overloaded, current_cpu, current_ram = self.check_system_load()
+    def track_usage(self, increment):
+        """記錄資源消耗量並檢查水位"""
+        self.current_usage += increment
+        logging.info(f"當前水位更新: {self.current_usage} / {self.daily_token_limit}")
         
-        if is_overloaded:
-            logging.warning(f"偵測到算力過載 (CPU: {current_cpu}%, RAM: {current_ram}%)。")
-            logging.info("觸發資源讓出，暫停本地高耗能運算，進入待機輪詢...")
+        if self.current_usage >= self.daily_token_limit:
+            self._enter_sleep_mode()
+
+    def _enter_sleep_mode(self):
+        """觸發強制休眠，切斷外部非必要排程"""
+        self.is_sleep_mode = True
+        logging.critical("!!! 警告：達到每日資源水位上限 !!!")
+        logging.critical("系統強制進入 [Sleep Mode]，所有非必要外部探測已掛起。")
+
+    def reset_daily_usage(self):
+        """週期性重置水位 (通常於每日 00:00 執行)"""
+        self.current_usage = 0
+        self.is_sleep_mode = False
+        logging.info("每日資源水位已重置，系統回復正常運作。")
+
+    def check_system_health(self):
+        """執行實體資源壓制檢查 (結合 psutil)"""
+        if self.is_sleep_mode:
+            return "SLEEP"
+        
+        # 偵測實體 CPU 與記憶體負載
+        cpu_usage = psutil.cpu_percent(interval=0.1)
+        ram_usage = psutil.virtual_memory().percent / 100.0
+        
+        if cpu_usage > self.cpu_limit or ram_usage > self.ram_limit:
+            logging.warning(f"實體負載過高 (CPU: {cpu_usage}%, RAM: {ram_usage*100:.1f}%)，觸發效能壓制。")
+            return "THROTTLED"
             
-            # 持續輪詢直到資源降至安全標準內
-            while is_overloaded:
-                time.sleep(check_interval)
-                is_overloaded, current_cpu, current_ram = self.check_system_load()
-                
-            logging.info(f"算力已恢復 (CPU: {current_cpu}%, RAM: {current_ram}%)。解除阻塞，恢復排程。")
-            return True
-        return False
+        return "HEALTHY"
 
-    def get_hardware_profile(self):
-        """
-        取得本機硬體基礎規格，供系統動態調整策略
-        """
-        profile = {
-            "logical_cores": psutil.cpu_count(logical=True),
-            "physical_cores": psutil.cpu_count(logical=False),
-            "total_ram_gb": round(psutil.virtual_memory().total / (1024 ** 3), 2)
-        }
-        return profile
-
-# 獨立測試區塊 (僅在直接執行此腳本時觸發)
+# --- 本機單獨測試區塊 ---
 if __name__ == "__main__":
     scheduler = MU06ResourceScheduler()
-    profile = scheduler.get_hardware_profile()
-    print(f"[系統初始化] 偵測到硬體規格: {profile['physical_cores']} 實體核心 / {profile['logical_cores']} 邏輯核心, {profile['total_ram_gb']} GB RAM")
     
-    # 執行一次負載檢測
-    scheduler.yield_resources()
+    # 測試實體狀態
+    print(f"\n[硬體檢測] 當前系統健康度: {scheduler.check_system_health()}")
+    
+    # 模擬資源消耗過程
+    test_increments = [20000, 30000, 60000]
+    
+    for inc in test_increments:
+        if not scheduler.is_sleep_mode:
+            print(f"\n執行任務中，消耗資源: {inc}")
+            scheduler.track_usage(inc)
+        else:
+            print("\n系統處於休眠狀態，拒絕執行任務。")
